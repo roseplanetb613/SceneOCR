@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 训练产物（不提交权重/日志/输出）
+checkpoints/
+logs/
+outputs/
+tmp_*/
+
+# IDE / 系统
+.idea/
+.vscode/
+.DS_Store
