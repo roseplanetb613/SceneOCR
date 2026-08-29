@@ -95,6 +95,7 @@
 管线 bug、`--train_backbone` 导致死区、OHEM 负样本比例不动点死锁），修复后 TD500 从"永远
 0.000"变为正常学习；当前精度受训练规模限制（300 张真实图），完整排查过程、对照实验与
 面试讲述建议见 **[调试实录](docs/debug-detector-story.md)**（含 [死区对比图](docs/deadlock_vs_fix.png)）。
+所有权重的**可用/历史标注**见 [权重清单](docs/checkpoints-inventory.md)。
 
 ## 🚀 快速开始
 
@@ -108,19 +109,19 @@ python data/synthtext_rec.py --max_words 150000   # 一次性: 提取+预裁剪�
 python examples/pretrain_ctc.py --data synthtext_rec \
     --precrop_train data/crops_rec_train150k.npy --precrop_train_labels data/labels_rec_train150k.pkl \
     --steps 12000 --batch 32 --init_ckpt checkpoints/ctc_synth62.pt \
-    --ckpt checkpoints/ctc_real62.pt
+    --ckpt checkpoints/ctc_real62c.pt
 
 # 识别单图推理
-python examples/infer_ctc.py --ckpt checkpoints/ctc_real62.pt
+python examples/infer_ctc.py --ckpt checkpoints/ctc_real62c.pt
 
 # 检测预训练（合成整图）
 python examples/pretrain_detector.py --data synth \
-    --steps 2000 --ckpt checkpoints/det_synth.pt
+    --steps 2000 --ckpt checkpoints/det_synth_v2.pt
 
 # 检测微调（真实数据，只载权重 + OHEM 死区防护）
 python examples/pretrain_detector.py \
     --data <MSRA-TD500路径> --lr 1e-3 --neg_ratio 1 \
-    --init_ckpt checkpoints/det_synth.pt --steps 3000
+    --init_ckpt checkpoints/det_synth_v2.pt --steps 3000
 ```
 
 > 所有训练脚本支持 `--resume` 断点续训 + 日志落盘 + 验证集评估。
@@ -132,7 +133,7 @@ python examples/pretrain_detector.py \
 | 脚本 | 作用 |
 |---|---|
 | `train_detector.bat` | 检测长训（SynthText + 预训练骨干 + 只解冻 FPN，断点续训） |
-| `train_recognizer.bat` | 识别长训（合成文本行，断点续训） |
+| `train_recognizer.bat` | 识别长训（合成文本行 62 词表，断点续训） |
 
 **手动命令**：
 
@@ -141,12 +142,12 @@ python examples/pretrain_detector.py \
 python examples/pretrain_detector.py \
     --data synth --img_size 512 --batch 2 --steps 2000 \
     --pretrained_backbone <预训练Hiera路径> \
-    --ckpt checkpoints/det_synth.pt --log logs/det_synth.log
+    --ckpt checkpoints/det_synth_v2.pt --log logs/det_synth.log
 
 # 真实数据微调（TD500 示例：--neg_ratio 1 破除 OHEM 死区，勿加 --train_backbone）
 python examples/pretrain_detector.py \
     --data <MSRA-TD500路径> --img_size 512 --batch 2 --steps 3000 \
-    --lr 1e-3 --neg_ratio 1 --init_ckpt checkpoints/det_synth.pt \
+    --lr 1e-3 --neg_ratio 1 --init_ckpt checkpoints/det_synth_v2.pt \
     --pretrained_backbone <预训练Hiera路径> \
     --ckpt checkpoints/det_td500.pt --log logs/det_td500.log
 
@@ -194,6 +195,7 @@ SceneOCR/
 │   └── train_recognizer.py      # 识别训练（EOS 并行解码对比版）
 └── docs/                  # 文档与效果图
     ├── debug-detector-story.md  # 调试实录：死区根因定位与修复（面试可讲的故事）
+    ├── checkpoints-inventory.md # 权重清单：可用/历史标注（排查来路）
     └── deadlock_vs_fix.png      # 死区死锁 vs 修复后对比图
 ```
 

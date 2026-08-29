@@ -1,6 +1,7 @@
 """端到端 OCR：成熟检测器(CRAFT, easyocr) + 自研 CTC 识别器。
 
-检测用成熟预训练权重(easyocr 的 CRAFT), 识别用我们训练的 CTCHead(ctc_full.pt, 36字符 94.5%)。
+检测用成熟预训练权重(easyocr 的 CRAFT), 识别用我们训练的 CTCHead
+(ctc_real62c.pt, 62字符词表: 合成 95.5% → SynthText 真实数据微调 60.6%)。
 这样检测立即可用(不用训), 识别是自研的 —— 端到端能读真实图片文字。
 """
 

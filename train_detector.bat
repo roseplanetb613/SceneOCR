@@ -18,7 +18,7 @@ python examples\pretrain_detector.py ^
   --steps 30000 ^
   --log_every 200 ^
   --save_every 1000 ^
-  --ckpt checkpoints\det_long.pt ^
+  --ckpt checkpoints\det_train.pt ^
   --log logs\det_long.log ^
   --resume
 pause
