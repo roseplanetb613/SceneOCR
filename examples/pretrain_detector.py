@@ -147,7 +147,13 @@ def main():
     ap.add_argument("--batch", type=int, default=2)
     ap.add_argument("--steps", type=int, default=1000)
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--neg_ratio", type=float, default=3.0,
+                    help="OHEM 负样本:正样本比例. 3=原版; 数据极稀疏(如 TD500)时可调 1~2, "
+                         "把 OHEM 常数不动点从 p=0.25 移到 p=0.5 附近, 避免 binary 分支饱和死锁")
     ap.add_argument("--train_backbone", action="store_true", help="一起训练骨干(慢)")
+    ap.add_argument("--train_neck", action="store_true",
+                    help="只解冻 FPN Neck(trunk 冻结): 参数少、特征变化温和, "
+                         "让 FPN 针对检测任务重组特征, 比全冻结强、比训骨干稳")
     ap.add_argument("--pretrained_backbone", default="",
                     help="预训练 Hiera 骨干权重路径(迁移学习起点, 加速收敛)")
     ap.add_argument("--log_every", type=int, default=100)
@@ -186,8 +192,17 @@ def main():
         log_line(args.log, f"== 已加载预训练骨干: {args.pretrained_backbone} ==")
     for p in model.parameters():
         p.requires_grad_(args.train_backbone)  # 默认冻结骨干
+    if args.train_neck:
+        # 只解冻 FPN neck(trunk 保持冻结): 参数少, 特征每步只微调, 不会重蹈 train_backbone 死区
+        for p in model.neck.parameters():
+            p.requires_grad_(True)
     head = DBNetHead(in_chans=256, num_levels=3).to(DEVICE)
-    params = list(head.parameters()) + (list(model.parameters()) if args.train_backbone else [])
+    trainable = list(head.parameters())
+    if args.train_backbone:
+        trainable += list(model.parameters())
+    elif args.train_neck:
+        trainable += list(model.neck.parameters())
+    params = trainable
     # 对照 PaddleOCR_DBNet: Adam + amsgrad, 权重衰减 0
     opt = torch.optim.Adam(params, lr=args.lr, weight_decay=0.0, amsgrad=True)
     sched = WarmupPolyLR(opt, warmup_steps=min(300, args.steps // 10), total_steps=args.steps)
@@ -209,6 +224,7 @@ def main():
     t0 = time.time()
     log_line(args.log, f"训练配置: data={args.data} img={args.img_size} batch={args.batch} "
              f"lr={args.lr} steps={args.steps} train_backbone={args.train_backbone} "
+             f"train_neck={args.train_neck} neg_ratio={args.neg_ratio} "
              f"pretrained={os.path.basename(args.pretrained_backbone) or '无'}")
 
     loss_sum, loss_cnt = 0.0, 0  # 平滑平均 loss
@@ -223,14 +239,14 @@ def main():
             sm, smask, tm, tmask = (sm.to(DEVICE), smask.to(DEVICE),
                                     tm.to(DEVICE), tmask.to(DEVICE))
             opt.zero_grad()
-            if args.train_backbone:
-                feats = model(imgs)["backbone_fpn"]  # 梯度回流骨干
+            if args.train_backbone or args.train_neck:
+                feats = model(imgs)["backbone_fpn"]  # 梯度回流骨干/neck
                 preds = head(feats)
             else:
                 with torch.no_grad():
                     feats = model(imgs)["backbone_fpn"]
                 preds = head([f.detach() for f in feats])
-            losses = db_loss(preds, sm, smask, tm, tmask)
+            losses = db_loss(preds, sm, smask, tm, tmask, neg_ratio=args.neg_ratio)
             losses["total"].backward()
             opt.step()
             sched.step()

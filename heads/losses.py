@@ -108,6 +108,7 @@ def db_loss(
     threshold_mask: torch.Tensor,  # (B,1,H,W) 阈值监督区域掩膜
     alpha: float = 1.0,    # shrink 损失权重 (对照原版 α=1)
     beta: float = 10.0,    # threshold 损失权重 (对照原版 β=10)
+    neg_ratio: float = 3.0,  # OHEM 负样本:正样本比例 (3=原版; 1=死区更易逃逸, 见下)
     eps: float = 1e-6,
 ):
     """DBNet 损失（对照 PaddleOCR_DBNet 原版）:
@@ -117,6 +118,10 @@ def db_loss(
         1. binary 用 Dice 监督、目标是收缩图 —— 之前用 BCE 对完整图, 和概率图目标冲突;
         2. 全程带 mask, 背景像素不直接主导;
         3. 阈值图是软值 0.3~0.7 而非 0/1 边界。
+
+    neg_ratio 说明: OHEM 常数不动点在 p = 1/(1+neg_ratio) 处
+        (neg_ratio=3 → p=0.25, binary=sigmoid(k·(P−T)) 在此完全饱和、梯度≈0, 训练死锁;
+         neg_ratio=1 → p=0.5, 恰是 binary 分支梯度最大处, 死区更容易逃逸)。
     """
     prob, thr, binary = preds["prob"], preds["thr"], preds["binary"]
     prob_p = torch.sigmoid(prob)  # 概率图 → 概率
@@ -130,7 +135,7 @@ def db_loss(
     sm = rb(shrink_map); smask = rb(shrink_mask)
     tm = rb(threshold_map); tmask = rb(threshold_mask)
 
-    loss_shrink = ohem_masked_bce(prob_p, sm, smask)          # 概率图: OHEM BCE + mask
+    loss_shrink = ohem_masked_bce(prob_p, sm, smask, neg_ratio=neg_ratio)  # 概率图: OHEM BCE + mask
     loss_thr = (torch.abs(thr_p - tm) * tmask).sum() / (tmask.sum() + eps)  # 阈值图: MaskL1
     loss_binary = dice_masked(binary, sm, smask)              # 二值图: Dice + mask
 
