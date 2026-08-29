@@ -1,8 +1,8 @@
 @echo off
-REM ===== 检测长训一键启动 =====
-REM 作用: 用自己的 Hiera+FPN+DBNetHead 在 SynthText 上大规模训练
-REM 用法: 双击运行; 想停止就按 Ctrl+C(会自动保存断点, 下次双击自动续训)
-REM 可改: --steps 训练步数, --synthtext_max 数据子集大小, --ckpt 断点路径
+REM ==== Detection long training launcher ====
+REM Double-click to start. Press Ctrl+C to stop (checkpoint auto-saved).
+REM Double-click again to resume automatically.
+REM Edit --steps / --synthtext_max / --ckpt as needed.
 setlocal
 set PYTHONPATH=%~dp0
 python examples\pretrain_detector.py ^
