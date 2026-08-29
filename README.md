@@ -112,6 +112,34 @@ python examples/pretrain_detector.py \
 
 > 所有训练脚本支持 `--resume` 断点续训 + 日志落盘 + 验证集评估。
 
+## 🎮 训练与终止 / 续训
+
+**一键启动**（Windows）：双击对应 `.bat`，想停就按 `Ctrl+C`（自动保存断点，下次双击自动续训）：
+
+| 脚本 | 作用 |
+|---|---|
+| `train_detector.bat` | 检测长训（SynthText + 预训练骨干，断点续训） |
+| `train_recognizer.bat` | 识别长训（合成文本行，断点续训） |
+
+**手动命令**：
+
+```bash
+# 检测长训（开始）
+python examples/pretrain_detector.py \
+    --data synthtext --synthtext_max 100000 --img_size 640 --batch 2 \
+    --train_backbone \
+    --pretrained_backbone <预训练Hiera路径> \
+    --steps 30000 --ckpt checkpoints/det_long.pt --log logs/det_long.log
+
+# 终止: Ctrl+C → 自动存断点 → 再次运行(加 --resume)即从断点续训
+python examples/pretrain_detector.py --data synthtext ... --resume
+```
+
+**断点续训机制**：
+- 每 `--save_every` 步 + Ctrl+C 中断时 + 训练完成时都会保存完整断点
+- 断点包含：模型 / 优化器 / 调度器 / 当前步数 / 最优指标 —— 续训后完全无缝
+- 日志追加到 `--log` 文件，崩溃/中断后能看历史曲线
+
 ## 📁 目录结构
 
 ```

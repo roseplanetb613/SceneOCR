@@ -179,6 +179,8 @@ def main():
         log_line(args.log, f"== 被中断, 断点已存 step {step+1} ==")
         return
 
+    # 正常跑完: 存最终断点
+    save_checkpoint(args.ckpt, model, opt, sched, args.steps, best_str, args)
     log_line(args.log, f"== 完成. best 整串准确率: {best_str:.3f}, checkpoint: {args.ckpt} ==")
 
 

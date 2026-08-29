@@ -207,7 +207,11 @@ def main():
     loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True, num_workers=0)
     it = iter(loader)
     t0 = time.time()
+    log_line(args.log, f"训练配置: data={args.data} img={args.img_size} batch={args.batch} "
+             f"lr={args.lr} steps={args.steps} train_backbone={args.train_backbone} "
+             f"pretrained={os.path.basename(args.pretrained_backbone) or '无'}")
 
+    loss_sum, loss_cnt = 0.0, 0  # 平滑平均 loss
     try:
         for step in range(start_step, args.steps):
             try:
@@ -230,11 +234,15 @@ def main():
             losses["total"].backward()
             opt.step()
             sched.step()
+            loss_sum += losses["total"].item()
+            loss_cnt += 1
 
             if step % args.log_every == 0 or step == args.steps - 1:
                 iou = eval_iou(model, head, val_ds, DEVICE, num=8)
                 spd = (step + 1 - start_step) / max(time.time() - t0, 1e-6)
-                log_line(args.log, f"step {step:5d}: total={losses['total'].item():.4f} "
+                avg = loss_sum / max(loss_cnt, 1)
+                loss_sum, loss_cnt = 0.0, 0
+                log_line(args.log, f"step {step:5d}: avg_total={avg:.4f} "
                          f"(shrink={losses['shrink'].item():.3f}, thr={losses['thr'].item():.3f}, "
                          f"binary={losses['binary'].item():.3f}) val-binary-IoU={iou:.3f}  ({spd:.1f} 步/s)")
                 if iou > best_iou:
@@ -251,6 +259,8 @@ def main():
         log_line(args.log, f"== 被中断, 断点已存 step {step+1} ==")
         return
 
+    # 正常跑完: 存最终断点(保证最后几步不丢)
+    save_checkpoint(args.ckpt, model, head, opt, sched, args.steps, best_iou, args)
     log_line(args.log, f"== 完成. best val-binary-IoU: {best_iou:.3f}, checkpoint: {args.ckpt} ==")
 
 
