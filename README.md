@@ -95,7 +95,24 @@
 管线 bug、`--train_backbone` 导致死区、OHEM 负样本比例不动点死锁），修复后 TD500 从"永远
 0.000"变为正常学习；当前精度受训练规模限制（300 张真实图），完整排查过程、对照实验与
 面试讲述建议见 **[调试实录](docs/debug-detector-story.md)**（含 [死区对比图](docs/deadlock_vs_fix.png)）。
-所有权重的**可用/历史标注**见 [权重清单](docs/checkpoints-inventory.md)。
+所有权重的**可用/历史标注**见 [权重清单](docs/checkpoints-inventory.md)，
+全部关键实验数据表见 **[实验数据汇总](docs/experiments-summary.md)**。
+
+## 📸 Demo 展示
+
+<div align="center">
+  <img src="docs/demo/rec_real.png" width="640" alt="识别 demo"/>
+  <br>
+  <sub>识别 · SynthText 真实词裁剪（绿框=正确，红框=错误，`ctc_real62c.pt`）</sub>
+  <br><br>
+  <img src="docs/demo/det_td500_0.png" width="640" alt="检测 demo"/>
+  <br>
+  <sub>检测 · TD500 真实测试图（红=预测，绿=GT，`det_td500_neg1b.pt`）</sub>
+  <br><br>
+  <img src="docs/demo/end2end.png" width="640" alt="端到端 demo"/>
+  <br>
+  <sub>端到端 · CRAFT 检测 + 自研 CTC 识别（真实照片）</sub>
+</div>
 
 ## 🚀 快速开始
 
@@ -195,8 +212,10 @@ SceneOCR/
 │   └── train_recognizer.py      # 识别训练（EOS 并行解码对比版）
 └── docs/                  # 文档与效果图
     ├── debug-detector-story.md  # 调试实录：死区根因定位与修复（面试可讲的故事）
+    ├── experiments-summary.md   # 实验数据汇总：检测/识别全部关键指标对照表
     ├── checkpoints-inventory.md # 权重清单：可用/历史标注（排查来路）
-    └── deadlock_vs_fix.png      # 死区死锁 vs 修复后对比图
+    ├── deadlock_vs_fix.png      # 死区死锁 vs 修复后对比图
+    └── demo/                    # Demo 效果图（检测/识别/端到端）
 ```
 
 ## 🗺️ Roadmap
