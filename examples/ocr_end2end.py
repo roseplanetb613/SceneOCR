@@ -16,7 +16,7 @@ from heads import CTCHead
 from heads.ctc_utils import ctc_greedy_decode
 from heads.recognition_utils import build_vocab
 
-ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -43,7 +43,8 @@ def recognize_crop(model, idx_to_char, crop):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", default="E:/Sam2/sam2/test.jpg")
-    ap.add_argument("--ckpt", default="checkpoints/ctc_full.pt")
+    ap.add_argument("--ckpt", default="checkpoints/ctc_real62c.pt",
+                    help="识别权重 (62字符词表: ctc_synth62 / ctc_real62b / ctc_real62c)")
     ap.add_argument("--out", default="outputs/ocr_end2end.png")
     args = ap.parse_args()
 

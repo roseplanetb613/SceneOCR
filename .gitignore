@@ -14,3 +14,5 @@ tmp_*/
 .vscode/
 .DS_Store
 data/cache_*.pkl
+data/crops_*.npy
+data/labels_*.pkl

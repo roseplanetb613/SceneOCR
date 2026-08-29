@@ -26,9 +26,12 @@ from heads import CTCHead
 from heads.ctc_utils import encode_text, ctc_greedy_decode
 from heads.recognition_utils import build_vocab
 from data.synth import SynthTextLineDataset
+from data.synthtext_rec import (SynthTextRecDataset, PrecroppedRecDataset,
+                                IMG_H, IMG_W)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DEFAULT_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+# 62 字符: 数字 + 大写 + 小写 (覆盖 SynthText 真实字符分布)
+DEFAULT_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 
 # ==================== checkpoint / 日志 ====================
@@ -78,6 +81,16 @@ def eval_metrics(model, imgs, texts, idx_to_char, blank_idx, device, chunk=32):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--alphabet", default=DEFAULT_ALPHABET)
+    ap.add_argument("--data", choices=["synth", "synthtext_rec"], default="synth",
+                    help="synth=自研合成; synthtext_rec=SynthText 词级真实渲染裁剪")
+    ap.add_argument("--synthtext_root", default="E:/迅雷下载/SynthText/SynthText")
+    ap.add_argument("--synthtext_cache", default="data/cache_synthtext_rec.pkl")
+    ap.add_argument("--synthtext_max", type=int, default=270000,
+                    help="synthtext_rec 训练子集大小(270000≈1轮/8437步; 微调建议 60000 加速轮次)")
+    ap.add_argument("--precrop_train", default="data/crops_rec_train.npy")
+    ap.add_argument("--precrop_train_labels", default="data/labels_rec_train.pkl")
+    ap.add_argument("--precrop_val", default="data/crops_rec_val.npy")
+    ap.add_argument("--precrop_val_labels", default="data/labels_rec_val.pkl")
     ap.add_argument("--max_len", type=int, default=8)
     ap.add_argument("--img_h", type=int, default=32)
     ap.add_argument("--img_w", type=int, default=128)
@@ -94,6 +107,8 @@ def main():
     ap.add_argument("--ckpt", default="checkpoints/ctc_pretrain.pt")
     ap.add_argument("--log", default="logs/ctc_pretrain.log")
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--init_ckpt", default=None,
+                    help="只载入权重(优化器重置), 用于合成预训练 → 真实数据微调")
     args = ap.parse_args()
 
     torch.manual_seed(0)
@@ -103,16 +118,29 @@ def main():
     blank_idx = VOCAB  # blank 是词表后第一个索引
 
     mode = f"固定{args.fixed_size}张" if args.fixed_size > 0 else "在线无限"
-    log_line(args.log, f"== CTC 启动 (词表{VOCAB}+blank, 设备{DEVICE}, {mode}, aug={args.aug_level}) ==")
+    log_line(args.log, f"== CTC 启动 (data={args.data} 词表{VOCAB}+blank, "
+             f"设备{DEVICE}, {mode}, aug={args.aug_level}) ==")
 
     # ---- 数据 ----
-    train_ds = SynthTextLineDataset(args.alphabet, args.max_len,
-                                    num_samples=args.fixed_size or 1_000_000,
-                                    img_h=args.img_h, img_w=args.img_w, seed=1,
-                                    aug_level=args.aug_level, fixed=args.fixed_size > 0)
-    val_ds = SynthTextLineDataset(args.alphabet, args.max_len, num_samples=args.val_size,
-                                  img_h=args.img_h, img_w=args.img_w, seed=999,
-                                  aug_level=args.aug_level, fixed=True)
+    if args.data == "synth":
+        train_ds = SynthTextLineDataset(args.alphabet, args.max_len,
+                                        num_samples=args.fixed_size or 1_000_000,
+                                        img_h=args.img_h, img_w=args.img_w, seed=1,
+                                        aug_level=args.aug_level, fixed=args.fixed_size > 0)
+        val_ds = SynthTextLineDataset(args.alphabet, args.max_len, num_samples=args.val_size,
+                                      img_h=args.img_h, img_w=args.img_w, seed=999,
+                                      aug_level=args.aug_level, fixed=True)
+    else:  # synthtext_rec (优先预裁剪缓存, 训练零读图开销)
+        import os as _os
+        if _os.path.exists(args.precrop_train):
+            train_ds = PrecroppedRecDataset(args.precrop_train, args.precrop_train_labels,
+                                            aug=True, seed=1)
+            val_ds = PrecroppedRecDataset(args.precrop_val, args.precrop_val_labels)
+        else:
+            train_ds = SynthTextRecDataset(args.synthtext_root, cache=args.synthtext_cache,
+                                           max_items=args.synthtext_max, seed=1, aug=True)
+            val_ds = SynthTextRecDataset(args.synthtext_root, cache=args.synthtext_cache,
+                                         max_items=args.val_size, seed=999)
     val_imgs = torch.stack([img for img, _ in val_ds])
     val_texts = [t for _, t in val_ds]
 
@@ -125,6 +153,10 @@ def main():
     if args.resume and os.path.exists(args.ckpt):
         start_step, best_str = load_checkpoint(args.ckpt, model, opt, sched, DEVICE)
         log_line(args.log, f"== 从 {args.ckpt} 续训 (step {start_step}) ==")
+    elif args.init_ckpt and os.path.exists(args.init_ckpt):
+        ckpt = torch.load(args.init_ckpt, map_location=DEVICE, weights_only=False)
+        model.load_state_dict(ckpt["model"])
+        log_line(args.log, f"== 从 {args.init_ckpt} 载入权重(优化器重置, 微调) ==")
     print(f"CTC 头参数量: {sum(p.numel() for p in model.parameters()):,}")
 
     loader = DataLoader(train_ds, batch_size=args.batch, num_workers=0, shuffle=True)
