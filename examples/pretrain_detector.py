@@ -25,8 +25,31 @@ from components.neck import FpnNeck, ImageEncoder, PositionEmbeddingSine
 from heads import DBNetHead, db_loss
 from data.td500 import MSRATD500Dataset
 from data.synth_det import SynthDetDataset
+from data.synthtext import SynthTextDataset
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+class WarmupPolyLR(torch.optim.lr_scheduler._LRScheduler):
+    """Warmup + 多项式衰减(对照 PaddleOCR_DBNet 的 WarmupPolyLR)。"""
+
+    def __init__(self, optimizer, warmup_steps, total_steps, power=0.9, min_lr=1e-7):
+        self.warmup_steps = warmup_steps
+        self.total_steps = total_steps
+        self.power = power
+        self.min_lr = min_lr
+        super().__init__(optimizer)
+
+    def get_lr(self):
+        step = self.last_epoch + 1  # 1 起
+        if step <= self.warmup_steps:
+            factor = step / max(self.warmup_steps, 1)
+        else:
+            progress = min((step - self.warmup_steps)
+                           / max(self.total_steps - self.warmup_steps, 1), 1.0)
+            factor = (1 - progress) ** self.power
+        # torch 的调度器要求返回每个 param group 一个值(列表)
+        return [max(base * factor, self.min_lr) for base in self.base_lrs]
 
 
 # ==================== checkpoint / 日志 ====================
@@ -81,13 +104,13 @@ def eval_iou(model, head, ds, device, num=8):
     ious = []
     with torch.no_grad():
         for i in range(min(num, len(ds))):
-            img, full, prob, thr = ds[i]
+            img, sm, smask, tm, tmask = ds[i]
             img = img[None].to(device)
             feats = model(img)["backbone_fpn"]
             preds = head([f.detach() for f in feats])
             b = preds["binary"]
-            # GT 补 batch 维 + 缩放到检测头输出分辨率再比 IoU
-            g = F.interpolate(full[None].to(device).float(), size=b.shape[-2:], mode="bilinear")
+            # 收缩图补 batch 维 + 缩放到检测头输出分辨率再比 IoU
+            g = F.interpolate(sm[None].to(device).float(), size=b.shape[-2:], mode="bilinear")
             ious.append(binary_iou(b, (g > 0.5).float()))
     return sum(ious) / max(len(ious), 1)
 
@@ -95,8 +118,11 @@ def eval_iou(model, head, ds, device, num=8):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="C:/Users/Inspiration/Desktop/MSRA-TD500",
-                    help="真实数据目录, 或 'synth' 用合成检测数据预训练")
+                    help="真实数据目录, 或 'synth'(自研合成) / 'synthtext'(SynthText)")
     ap.add_argument("--synth_samples", type=int, default=10000, help="--data synth 时的样本量")
+    ap.add_argument("--synthtext_root", default="E:/迅雷下载/SynthText/SynthText")
+    ap.add_argument("--synthtext_cache", default="data/cache_synthtext.pkl")
+    ap.add_argument("--synthtext_max", type=int, default=20000, help="SynthText 子集大小")
     ap.add_argument("--img_size", type=int, default=512)
     ap.add_argument("--batch", type=int, default=2)
     ap.add_argument("--steps", type=int, default=1000)
@@ -119,6 +145,13 @@ def main():
         val_ds = SynthDetDataset(50, img_size=args.img_size, seed=999)
         log_line(args.log, f"== 合成检测预训练 (train {args.synth_samples}, "
                  f"img {args.img_size}, backbone训练={args.train_backbone}) ==")
+    elif args.data == "synthtext":
+        train_ds = SynthTextDataset(args.synthtext_root, cache=args.synthtext_cache,
+                                    img_size=args.img_size, max_images=args.synthtext_max, seed=1)
+        val_ds = SynthTextDataset(args.synthtext_root, cache=args.synthtext_cache,
+                                  img_size=args.img_size, max_images=200, seed=999)
+        log_line(args.log, f"== SynthText 检测预训练 (train {args.synthtext_max}, "
+                 f"img {args.img_size}, backbone训练={args.train_backbone}) ==")
     else:
         train_ds = MSRATD500Dataset(args.data, split="train", img_size=args.img_size)
         val_ds = MSRATD500Dataset(args.data, split="test", img_size=args.img_size)
@@ -130,8 +163,9 @@ def main():
         p.requires_grad_(args.train_backbone)  # 默认冻结骨干
     head = DBNetHead(in_chans=256, num_levels=3).to(DEVICE)
     params = list(head.parameters()) + (list(model.parameters()) if args.train_backbone else [])
-    opt = torch.optim.AdamW(params, lr=args.lr)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.steps)
+    # 对照 PaddleOCR_DBNet: Adam + amsgrad, 权重衰减 0
+    opt = torch.optim.Adam(params, lr=args.lr, weight_decay=0.0, amsgrad=True)
+    sched = WarmupPolyLR(opt, warmup_steps=min(300, args.steps // 10), total_steps=args.steps)
     print(f"DBNetHead 参数: {sum(p.numel() for p in head.parameters()):,}")
 
     start_step, best_iou = 0, 0.0
@@ -152,17 +186,22 @@ def main():
     try:
         for step in range(start_step, args.steps):
             try:
-                imgs, full, prob, thr = next(it)
+                imgs, sm, smask, tm, tmask = next(it)
             except StopIteration:
                 it = iter(loader)
-                imgs, full, prob, thr = next(it)
+                imgs, sm, smask, tm, tmask = next(it)
             imgs = imgs.to(DEVICE)
-            full, prob, thr = full.to(DEVICE), prob.to(DEVICE), thr.to(DEVICE)
+            sm, smask, tm, tmask = (sm.to(DEVICE), smask.to(DEVICE),
+                                    tm.to(DEVICE), tmask.to(DEVICE))
             opt.zero_grad()
-            with torch.no_grad():
-                feats = model(imgs)["backbone_fpn"]
-            preds = head([f.detach() for f in feats])
-            losses = db_loss(preds, full, prob_gt=prob, thr_gt=thr)
+            if args.train_backbone:
+                feats = model(imgs)["backbone_fpn"]  # 梯度回流骨干
+                preds = head(feats)
+            else:
+                with torch.no_grad():
+                    feats = model(imgs)["backbone_fpn"]
+                preds = head([f.detach() for f in feats])
+            losses = db_loss(preds, sm, smask, tm, tmask)
             losses["total"].backward()
             opt.step()
             sched.step()
@@ -171,8 +210,8 @@ def main():
                 iou = eval_iou(model, head, val_ds, DEVICE, num=8)
                 spd = (step + 1 - start_step) / max(time.time() - t0, 1e-6)
                 log_line(args.log, f"step {step:5d}: total={losses['total'].item():.4f} "
-                         f"(prob_bce={losses['prob_bce'].item():.3f}, dice={losses['dice'].item():.3f}) "
-                         f"val-binary-IoU={iou:.3f}  ({spd:.1f} 步/s)")
+                         f"(shrink={losses['shrink'].item():.3f}, thr={losses['thr'].item():.3f}, "
+                         f"binary={losses['binary'].item():.3f}) val-binary-IoU={iou:.3f}  ({spd:.1f} 步/s)")
                 if iou > best_iou:
                     best_iou = iou
                     save_checkpoint(args.ckpt, model, head, opt, sched, step + 1, best_iou, args)

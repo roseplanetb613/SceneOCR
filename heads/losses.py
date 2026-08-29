@@ -20,16 +20,23 @@ def dice_loss(inputs, targets, eps=1.0):
     return (1 - (numerator + eps) / (denominator + eps)).mean()
 
 
-def ohem_bce(logits, targets, neg_pos_ratio=3):
+def ohem_bce(logits_or_prob, targets, neg_pos_ratio=3):
     """在线难例挖掘 BCE：取全部正样本 + 最难的 top-k 负样本。
 
     文本像素占比极小(1~3%), 普通 BCE 会被背景主导 → 模型学成"全背景"。
     OHEM 只回传: 所有文本像素 + 损失最大的负样本(难例), 逼模型关注前景。
+    自动识别输入是 logits 还是概率(0~1): 概率范围明显在 (-1,1.5) 内视为 sigmoid 概率。
     """
-    loss = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    x = logits_or_prob
+    if x.min() < -1.0 or x.max() > 1.5:
+        loss = F.binary_cross_entropy_with_logits(x, targets, reduction="none")
+    else:
+        # 概率输入可能因 sigmoid 饱和精确到 0/1, clamp 避免 -log(0)=inf → NaN
+        x = x.clamp(1e-6, 1 - 1e-6)
+        loss = F.binary_cross_entropy(x, targets, reduction="none")
     loss_flat, tgt_flat = loss.flatten(1), targets.flatten(1)
     ohem = []
-    for b in range(logits.shape[0]):
+    for b in range(x.shape[0]):
         pos = tgt_flat[b] > 0.5
         num_pos = int(pos.sum().item())
         if num_pos == 0:
@@ -61,51 +68,76 @@ def make_boundary_map(gt, kernel=3):
     return (dilate - erode).clamp(0, 1)
 
 
-def db_loss(
-    preds: dict,          # DBNetHead 输出: {prob, thr, binary}
-    gt: torch.Tensor,     # GT 完整文本掩膜 (B,1,H,W)，监督二值图
-    prob_gt: torch.Tensor = None,  # 收缩后的概率图 GT（DBNet 用收缩掩膜监督 prob）
-    thr_gt: torch.Tensor = None,   # 边界带阈值图 GT（DBNet 用边界带监督 thr）
-    alpha: float = 10.0,  # 阈值图损失权重 (DBNet 原文 α=10)
-    beta: float = 1.0,    # 二值图损失权重 (DBNet 原文 β=1)
-    thr_kernel: int = 5,  # 无 thr_gt 时自动构造边界带的核大小
-):
-    """DBNet 损失 = L_s(概率图) + α L_t(阈值图) + β L_b(二值图)。
+def ohem_masked_bce(pred, gt, mask, neg_ratio=3.0, eps=1e-6):
+    """BalanceCrossEntropy（对照 PaddleOCR_DBNet）：OHEM + mask，pred 已过 sigmoid。
 
-    关键: L_s 对 prob 图直接算 BCE+Dice(不经过饱和的 DB binary),
-    保证梯度始终能流向概率头 —— 否则 k=50 的 DB 一饱和梯度就消失、训练卡死。
+    positive = gt*mask, negative = (1-gt)*mask; 取全部正样本 + top-k 难负样本。
+    """
+    positive = gt * mask
+    negative = (1 - gt) * mask
+    positive_count = int(positive.sum())
+    negative_count = min(int(negative.sum()), int(positive_count * neg_ratio))
+    loss = F.binary_cross_entropy(pred.clamp(1e-6, 1 - 1e-6), gt, reduction="none")
+    positive_loss = (loss * positive).sum()
+    if negative_count > 0:
+        # topk 后要 .sum(), 否则返回的是张量不是标量
+        negative_loss = (loss * negative).reshape(-1).topk(negative_count).values.sum()
+    else:
+        negative_loss = loss.new_tensor(0.0)
+    return (positive_loss + negative_loss) / (positive_count + negative_count + eps)
+
+
+def dice_masked(pred, gt, mask, eps=1e-6):
+    """Masked Dice（对照 PaddleOCR_DBNet）：binary 图的监督，带 mask。"""
+    if pred.dim() == 4:
+        pred = pred[:, 0]
+    if gt.dim() == 4:
+        gt = gt[:, 0]
+    if mask.dim() == 4:
+        mask = mask[:, 0]
+    intersection = (pred * gt * mask).sum()
+    union = (pred * mask).sum() + (gt * mask).sum() + eps
+    return 1 - 2.0 * intersection / union
+
+
+def db_loss(
+    preds: dict,          # DBNetHead 输出: {prob(logits), thr(logits), binary(sigmoid)}
+    shrink_map: torch.Tensor,    # (B,1,H,W) 收缩文本掩膜
+    shrink_mask: torch.Tensor,   # (B,1,H,W) 有效区域掩膜
+    threshold_map: torch.Tensor, # (B,1,H,W) 软阈值图 0.3~0.7
+    threshold_mask: torch.Tensor,  # (B,1,H,W) 阈值监督区域掩膜
+    alpha: float = 1.0,    # shrink 损失权重 (对照原版 α=1)
+    beta: float = 10.0,    # threshold 损失权重 (对照原版 β=10)
+    eps: float = 1e-6,
+):
+    """DBNet 损失（对照 PaddleOCR_DBNet 原版）:
+        loss = α·BalanceCE(prob, shrink) + β·MaskL1(thr, threshold) + Dice(binary, shrink)
+
+    关键修复(对比之前版本):
+        1. binary 用 Dice 监督、目标是收缩图 —— 之前用 BCE 对完整图, 和概率图目标冲突;
+        2. 全程带 mask, 背景像素不直接主导;
+        3. 阈值图是软值 0.3~0.7 而非 0/1 边界。
     """
     prob, thr, binary = preds["prob"], preds["thr"], preds["binary"]
+    prob_p = torch.sigmoid(prob)  # 概率图 → 概率
+    thr_p = torch.sigmoid(thr)    # 阈值图 → 概率
 
-    def _resize_bin(m):
-        """缩放到输出分辨率并二值化。"""
-        target_hw = prob.shape[-2:]
-        if m.shape[-2:] != target_hw:
-            m = F.interpolate(m.float(), size=target_hw, mode="bilinear", align_corners=False)
-        return (m > 0.5).float()
+    target = prob.shape[-2:]
+    def rb(x):
+        if x.shape[-2:] != target:
+            x = F.interpolate(x.float(), size=target, mode="bilinear", align_corners=False)
+        return x
+    sm = rb(shrink_map); smask = rb(shrink_mask)
+    tm = rb(threshold_map); tmask = rb(threshold_mask)
 
-    gt_b = _resize_bin(gt)                     # 完整掩膜 → 二值图监督
-    prob_gt_b = _resize_bin(prob_gt if prob_gt is not None else gt)
-    if thr_gt is None:
-        thr_gt = make_boundary_map(gt_b, kernel=thr_kernel)
-    thr_gt_b = _resize_bin(thr_gt)
+    loss_shrink = ohem_masked_bce(prob_p, sm, smask)          # 概率图: OHEM BCE + mask
+    loss_thr = (torch.abs(thr_p - tm) * tmask).sum() / (tmask.sum() + eps)  # 阈值图: MaskL1
+    loss_binary = dice_masked(binary, sm, smask)              # 二值图: Dice + mask
 
-    # L_s: 概率图 (OHEM BCE + Dice) 对收缩 GT —— 主要的梯度来源
-    prob_bce = ohem_bce(prob, prob_gt_b)  # 难例挖掘, 避免被背景主导
-    prob_dice = dice_loss(prob.sigmoid(), prob_gt_b)
-    loss_s = prob_bce + prob_dice
-
-    # L_t: 阈值图 L1 对边界带
-    loss_t = F.l1_loss(thr.sigmoid(), thr_gt_b, reduction="mean")
-
-    # L_b: 二值图 BCE 对完整 GT（通过 DB, 饱和时梯度弱, 辅助作用）
-    loss_b = F.binary_cross_entropy(binary, gt_b, reduction="mean")
-
-    total = loss_s + alpha * loss_t + beta * loss_b
+    total = alpha * loss_shrink + beta * loss_thr + loss_binary
     return {
         "total": total,
-        "prob_bce": prob_bce,
-        "dice": prob_dice,
-        "thr": loss_t,
-        "binary_bce": loss_b,
+        "shrink": loss_shrink,
+        "thr": loss_thr,
+        "binary": loss_binary,
     }

@@ -17,6 +17,9 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from data.db_masks import make_db_masks
+from data.det_augment import random_crop_containing_text, flip_horizontal
+
 
 def parse_td500_gt(gt_path, drop_hard=True):
     """解析 .gt → 多边形列表 [(4,2) np.float32, ...]（原图坐标）。"""
@@ -90,23 +93,22 @@ class MSRATD500Dataset(Dataset):
 
     def __getitem__(self, idx):
         img_path, gt_path = self.samples[idx]
-        # 读图 (BGR→RGB), 拿到原始尺寸
-        img = cv2.imread(img_path)
+        # 读图 (BGR→RGB), 拿到原始尺寸; 用 fromfile+imdecode 兼容中文路径
+        img = cv2.imdecode(np.fromfile(img_path, dtype=np.uint8), cv2.IMREAD_COLOR)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         orig_h, orig_w = img.shape[:2]
         # resize 到训练尺寸
         img = cv2.resize(img, (self.img_size, self.img_size))
         img = torch.from_numpy(img).permute(2, 0, 1).float().div(255.0)
 
-        scale_x, scale_y = self.img_size / orig_w, self.img_size / orig_h
         polys = parse_td500_gt(gt_path)
-        full = draw_polygon_mask(polys, self.img_size, self.img_size, scale_x, scale_y)
-        # DBNet 的收缩量按文本尺寸缩放(粗略: 原图 1728 对应核 9)
-        shrink_k = max(5, int(9 * (self.img_size / 1728) / 2) * 2 + 1)
-        prob = shrink_mask(full, shrink_k)
-        thr = boundary_mask(full)
+        # 随机裁剪含文本区域(对照 EastRandomCropData) + 翻转
+        img, polys = random_crop_containing_text(
+            img, polys, target_size=(self.img_size, self.img_size))
+        img, polys = flip_horizontal(img, polys)
+        sm, smask, tm, tmask = make_db_masks(polys, self.img_size, self.img_size)
 
         def to_t(m):
             return torch.from_numpy(m.astype(np.float32))[None]  # (1,H,W)
 
-        return img, to_t(full), to_t(prob), to_t(thr)
+        return img, to_t(sm), to_t(smask), to_t(tm), to_t(tmask)

@@ -80,14 +80,15 @@ def main():
     for step in range(STEPS):
         opt.zero_grad()
         preds = head(features)
-        losses = db_loss(preds, gt_small)
+        ones = torch.ones_like(gt_small)
+        losses = db_loss(preds, gt_small, ones, gt_small, ones)  # 合成矩形冒烟, 简化 GT
         losses["total"].backward()
         opt.step()
         if step % 80 == 0 or step == STEPS - 1:
             iou = detect_iou(preds["binary"].detach(), gt_small)
             print(f"step {step:3d}: total={losses['total'].item():.4f} "
-                  f"(bce={losses['bce'].item():.4f}, dice={losses['dice'].item():.4f}, "
-                  f"thr={losses['thr'].item():.4f})  binary-IoU={iou:.3f}")
+                  f"(shrink={losses['shrink'].item():.4f}, thr={losses['thr'].item():.4f}, "
+                  f"binary={losses['binary'].item():.4f})  binary-IoU={iou:.3f}")
 
     # ---- 5. 后处理: 概率图 → 检测框 ----
     with torch.no_grad():

@@ -25,7 +25,7 @@ class DBNetHead(nn.Module):
         in_chans: int = 256,   # FPN 每层通道数
         num_levels: int = 3,   # 使用的 FPN 层数
         inner_chans: int = 256,  # 融合后的特征通道
-        k: float = 50.0,       # 可微分二值化的放大系数
+        k: float = 10.0,       # 可微分二值化的放大系数(小一点梯度更平缓, 训练更稳)
     ):
         super().__init__()
         self.k = k

@@ -13,3 +13,4 @@ tmp_*/
 .idea/
 .vscode/
 .DS_Store
+data/cache_*.pkl

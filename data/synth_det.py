@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from data.td500 import draw_polygon_mask, shrink_mask, boundary_mask
+from data.db_masks import make_db_masks
 
 
 def _rotated_rect(cx, cy, w, h, theta_deg):
@@ -84,14 +84,11 @@ class SynthDetDataset(Dataset):
                 cv2.polylines(img, [pts.reshape(-1, 1, 2)], False, bg, 2)
             polys.append(poly)
 
-        # ---- GT 掩膜(和 TD500 一样: 完整/收缩/边界) ----
-        full = draw_polygon_mask(polys, S, S)
-        shrink_k = max(5, int(9 * (S / 1728) / 2) * 2 + 1)
-        prob = shrink_mask(full, shrink_k)
-        thr = boundary_mask(full)
+        # ---- GT 掩膜 (收缩图/掩膜/软阈值图/阈值掩膜) ----
+        sm, smask, tm, tmask = make_db_masks(polys, S, S)
 
         def to_t(m):
             return torch.from_numpy(m.astype(np.float32))[None]
 
         img_t = torch.from_numpy(img).permute(2, 0, 1).float().div(255.0)
-        return img_t, to_t(full), to_t(prob), to_t(thr)
+        return img_t, to_t(sm), to_t(smask), to_t(tm), to_t(tmask)
