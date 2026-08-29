@@ -69,8 +69,11 @@
 ```
 
 - **视觉特征提取**：自实现的层次化多尺度视觉骨干 + 特征金字塔（FPN），输出多分辨率特征供检测使用。
+  **双骨干设计**：检测走 Hiera+FPN 大编码器（整图、强语义），识别走轻量卷积骨干（文本行小图），
+  两者独立训练互不干扰。
 - **DBNet 检测头**：`sigmoid(k·(prob − thr))` 可微分二值化，把阈值图也纳入学习；
-  训练用 **OHEM** 聚焦文本像素，克服前景占比过小。
+  训练用 **OHEM** 聚焦文本像素，克服前景占比过小（`neg_ratio` 可调以避开死锁不动点）。
+  默认**冻结预训练 Hiera 骨干**（可 `--train_neck` 只解冻 FPN），迁移稳定、收敛快。
 - **CTC 识别头**：特征图 → 逐列打分，`ctc_loss` 自动对齐变长文本，**无需固定位置对齐**。
 
 ## 📊 训练结果
@@ -79,15 +82,17 @@
 |---|---|---|---|
 | 文本识别（CTC） | 合成 3000 张（全增强） | 10 数字 | **整串 98.5%** |
 | 文本识别（CTC） | 合成 5000 张（全增强） | 36 字母数字 | **整串 94.5%** |
-| 文本检测 | 合成整图 | 随机文本框 | **二值掩膜 IoU 94%** |
+| 文本检测 | 合成整图（预训练骨干冻结） | 随机文本框 | **二值掩膜 IoU 87%**（旧版 94%） |
 | 文本检测 | 合成矩形（冒烟） | 3 个矩形 | **IoU 100%** |
-| 文本检测 | SynthText 真实数据 | — | 见下方说明 |
+| 文本检测 | MSRA-TD500 微调 | 300 张真实图 | 确定性 mean IoU 6%（见调试实录）|
 
 **检测的诚实说明**：DBNet 实现已对照成熟开源方案（PaddleOCR-DBNet）逐项校准——
 损失（binary 用 Dice 对收缩图 + 全程 mask + 软阈值图）、数据增强（随机裁剪含文本区域）、
-优化器（Adam amsgrad + WarmupPolyLR）。**合成域验证收敛**（矩形 100%、自研合成 94%），
-证明实现正确；真实数据（SynthText/TD500）目前受训练规模限制未收敛（原版需 1200 轮 × 80 万张），
-下一步计划从预训练骨干初始化 + 蒸馏加速。
+优化器（Adam amsgrad + WarmupPolyLR）。**合成域验证收敛**（矩形 100%、自研合成 87~94%），
+证明实现正确。真实数据此前训练 IoU 恒 0.000 的**根因已定位并修复**（三层问题：TD500 数据
+管线 bug、`--train_backbone` 导致死区、OHEM 负样本比例不动点死锁），修复后 TD500 从"永远
+0.000"变为正常学习；当前精度受训练规模限制（300 张真实图），完整排查过程、对照实验与
+面试讲述建议见 **[调试实录](docs/debug-detector-story.md)**（含 [死区对比图](docs/deadlock_vs_fix.png)）。
 
 ## 🚀 快速开始
 
@@ -104,10 +109,10 @@ python examples/infer_ctc.py --ckpt checkpoints/ctc_full.pt
 python examples/pretrain_detector.py --data synth \
     --steps 2000 --ckpt checkpoints/det_synth.pt
 
-# 检测微调（真实数据，低学习率只载权重）
+# 检测微调（真实数据，只载权重 + OHEM 死区防护）
 python examples/pretrain_detector.py \
-    --data <MSRA-TD500路径> --lr 1e-4 \
-    --init_ckpt checkpoints/det_synth.pt --steps 1500
+    --data <MSRA-TD500路径> --lr 1e-3 --neg_ratio 1 \
+    --init_ckpt checkpoints/det_synth.pt --steps 3000
 ```
 
 > 所有训练脚本支持 `--resume` 断点续训 + 日志落盘 + 验证集评估。
@@ -118,22 +123,32 @@ python examples/pretrain_detector.py \
 
 | 脚本 | 作用 |
 |---|---|
-| `train_detector.bat` | 检测长训（SynthText + 预训练骨干，断点续训） |
+| `train_detector.bat` | 检测长训（SynthText + 预训练骨干 + 只解冻 FPN，断点续训） |
 | `train_recognizer.bat` | 识别长训（合成文本行，断点续训） |
 
 **手动命令**：
 
 ```bash
-# 检测长训（开始）
+# 检测长训（推荐：冻结骨干 + 预训练 Hiera，合成域已验证收敛）
 python examples/pretrain_detector.py \
-    --data synthtext --synthtext_max 100000 --img_size 640 --batch 2 \
-    --train_backbone \
+    --data synth --img_size 512 --batch 2 --steps 2000 \
     --pretrained_backbone <预训练Hiera路径> \
-    --steps 30000 --ckpt checkpoints/det_long.pt --log logs/det_long.log
+    --ckpt checkpoints/det_synth.pt --log logs/det_synth.log
+
+# 真实数据微调（TD500 示例：--neg_ratio 1 破除 OHEM 死区，勿加 --train_backbone）
+python examples/pretrain_detector.py \
+    --data <MSRA-TD500路径> --img_size 512 --batch 2 --steps 3000 \
+    --lr 1e-3 --neg_ratio 1 --init_ckpt checkpoints/det_synth.pt \
+    --pretrained_backbone <预训练Hiera路径> \
+    --ckpt checkpoints/det_td500.pt --log logs/det_td500.log
 
 # 终止: Ctrl+C → 自动存断点 → 再次运行(加 --resume)即从断点续训
-python examples/pretrain_detector.py --data synthtext ... --resume
+python examples/pretrain_detector.py --data synth ... --resume
 ```
+
+> ⚠️ **重要**：不要加 `--train_backbone`（骨干 + 检测头一起训）——实测会让训练塌进死区
+> （IoU 恒 0.000，4400 步无解）。可改用 `--train_neck` 只解冻 FPN（参数少、特征变化温和）。
+> 稀疏数据（如 TD500）务必 `--neg_ratio 1`，详见 [调试实录](docs/debug-detector-story.md)。
 
 **断点续训机制**：
 - 每 `--save_every` 步 + Ctrl+C 中断时 + 训练完成时都会保存完整断点
@@ -169,16 +184,20 @@ SceneOCR/
 │   ├── ocr_end2end.py           # 端到端：成熟检测(CRAFT) + 自研识别
 │   └── train_recognizer.py      # 识别训练（EOS 并行解码对比版）
 └── docs/                  # 文档与效果图
+    ├── debug-detector-story.md  # 调试实录：死区根因定位与修复（面试可讲的故事）
+    └── deadlock_vs_fix.png      # 死区死锁 vs 修复后对比图
 ```
 
 ## 🗺️ Roadmap
 
 - [x] 识别头（CTC）合成预训练，36 字符 **94.5%**
 - [x] 检测头（DBNet）+ 损失/数据/训练配置对齐成熟方案
-- [x] 合成检测预训练（域内 IoU **94%**，矩形冒烟 **100%**）
+- [x] 合成检测预训练（域内 IoU **87%**，矩形冒烟 **100%**）
 - [x] SynthText 数据管线（缓存/解析/增强）
 - [x] 预训练骨干初始化（加载预训练 Hiera）
 - [x] 端到端管线（成熟 CRAFT 检测 + 自研 CTC 识别）
+- [x] **真实数据训练死锁根因定位与修复**（数据管线 bug / train_backbone 死区 / OHEM 不动点，
+      见 [调试实录](docs/debug-detector-story.md)）
 - [ ] **识别真实数据微调**（识别当前只在合成数据上训过，真实图需微调）← 下一步
 - [ ] SynthText 检测长训（受算力限制）
 - [ ] 知识蒸馏（从成熟模型学软输出）
@@ -196,6 +215,11 @@ SceneOCR/
 6. **优化器**：Adam(amsgrad=True, weight_decay=0) + WarmupPolyLR（预热 3 轮 + 多项式衰减）。
 7. **训练规模是硬约束**：原版 SynthText 是 1200 轮 × 80 万张；小规模从头训不收敛是正常的，
    解决靠预训练骨干初始化 / 蒸馏 / 足够算力，而非继续调损失。
+8. **OHEM 的负样本比例是"死锁开关"**：若概率图塌成常数 p，OHEM 损失的不动点在
+   `p = 1/(1+neg_ratio)`。`neg_ratio=3`（原版）→ p=0.25，此时 `binary = sigmoid(k·(P−T))`
+   完全饱和、Dice 梯度≈0 → **训练死锁**（症状：`shrink≈0.56, binary=1.000, IoU 恒 0`），
+   数据越稀疏（如 TD500 前景仅 0.1~1.2%）越逃不出来。改 `--neg_ratio 1` 把不动点移到
+   p=0.5（binary 梯度最大处），死区自解（实测：binary 分支复活，IoU 从恒 0 开始上涨）。
 
 ## 📚 数据集
 
