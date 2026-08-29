@@ -35,20 +35,21 @@
 
 ## 🔍 端到端检测案例
 
-检测器用**成熟预训练权重**（CRAFT，easyocr 提供），对真实照片定位文本区域：
+**两条端到端路径**（检测与识别均为自研，另有成熟检测器对照）：
 
-<div align="center">
-  <img src="docs/detect_case_test.jpg" width="780" alt="CRAFT 检测 demo"/>
-  <br>
-  <sub>真实照片文本检测：绿色框为检测器定位的文本区域（正确命中所有文字）</sub>
-</div>
+| 脚本 | 检测 | 识别 | 定位 |
+|---|---|---|---|
+| `examples/ocr_end2end_dbnet.py` | **自研 DBNet**（`det_synth_v2.pt` / `det_td500_neg1b.pt`）| **自研 CTC**（`ctc_real62c.pt`）| 全自研链路已打通 |
+| `examples/ocr_end2end.py` | 成熟 CRAFT（easyocr）| **自研 CTC** | 真实照片端到端流程验证 |
 
-端到端管线（`examples/ocr_end2end.py`）＝ 成熟检测器(CRAFT) + 自研 CTC 识别器：
 ```
-真实图片 → [CRAFT 检测] → 文本框 → 裁剪 → [自研 CTC 识别] → 文字
+真实图片 → [自研 DBNet / CRAFT 检测] → 文本框 → 裁剪 → [自研 CTC 识别] → 文字
 ```
-当前：检测✅ 已用成熟权重开箱即用（自研 DBNet 训练管线已修复）；识别✅ 已在 SynthText
-真实渲染数据上微调（整串 60.6%），端到端管线（CRAFT 检测 + 自研 CTC）已跑通真实照片。
+
+**诚实说明**：识别（自研）已在 SynthText 真实渲染数据上微调（整串 60.6%），端到端可跑；
+自研检测目前只在 300 张 TD500 上微调（确定性 mean IoU ~0.06），**训练域外的真实图基本
+不可用**——全自研链路的意义是证明"检测→识别"闭环已打通，检测精度需长训练提升
+（合成域已验证收敛 IoU 0.847）。因此真实照片的端到端效果目前依赖 CRAFT 检测。
 
 ## 🏗️ 系统架构
 
