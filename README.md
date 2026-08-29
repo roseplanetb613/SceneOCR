@@ -47,7 +47,8 @@
 ```
 真实图片 → [CRAFT 检测] → 文本框 → 裁剪 → [自研 CTC 识别] → 文字
 ```
-当前：检测✅ 已用成熟权重开箱即用；识别❌ 真实数据仍需微调（模型目前只在合成数据上训练）。
+当前：检测✅ 已用成熟权重开箱即用（自研 DBNet 训练管线已修复）；识别✅ 已在 SynthText
+真实渲染数据上微调（整串 60.6%），端到端管线（CRAFT 检测 + 自研 CTC）已跑通真实照片。
 
 ## 🏗️ 系统架构
 
@@ -81,7 +82,8 @@
 | 任务 | 数据 | 词表/难度 | 指标 |
 |---|---|---|---|
 | 文本识别（CTC） | 合成 3000 张（全增强） | 10 数字 | **整串 98.5%** |
-| 文本识别（CTC） | 合成 5000 张（全增强） | 36 字母数字 | **整串 94.5%** |
+| 文本识别（CTC） | 合成 10000 张（全增强） | 62 字母数字 | **整串 95.5%** |
+| 文本识别（CTC） | SynthText 真实渲染 15 万词 | 62 字母数字 | **整串 60.6%**（字符 76.2%）|
 | 文本检测 | 合成整图（预训练骨干冻结） | 随机文本框 | **二值掩膜 IoU 87%**（旧版 94%） |
 | 文本检测 | 合成矩形（冒烟） | 3 个矩形 | **IoU 100%** |
 | 文本检测 | MSRA-TD500 微调 | 300 张真实图 | 确定性 mean IoU 6%（见调试实录）|
@@ -98,12 +100,18 @@
 
 ```bash
 # 识别预训练（合成数据，断点自动保存）
-python examples/pretrain_ctc.py \
-    --alphabet "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" \
-    --fixed_size 5000 --steps 4000 --ckpt checkpoints/ctc_full.pt
+python examples/pretrain_ctc.py --data synth \
+    --fixed_size 10000 --steps 8000 --batch 32 --ckpt checkpoints/ctc_synth62.pt
+
+# 识别真实数据微调（SynthText 词级: 先离线预裁剪再训练, 见 data/synthtext_rec.py）
+python data/synthtext_rec.py --max_words 150000   # 一次性: 提取+预裁剪缓存
+python examples/pretrain_ctc.py --data synthtext_rec \
+    --precrop_train data/crops_rec_train150k.npy --precrop_train_labels data/labels_rec_train150k.pkl \
+    --steps 12000 --batch 32 --init_ckpt checkpoints/ctc_synth62.pt \
+    --ckpt checkpoints/ctc_real62.pt
 
 # 识别单图推理
-python examples/infer_ctc.py --ckpt checkpoints/ctc_full.pt
+python examples/infer_ctc.py --ckpt checkpoints/ctc_real62.pt
 
 # 检测预训练（合成整图）
 python examples/pretrain_detector.py --data synth \
@@ -172,6 +180,7 @@ SceneOCR/
 ├── data/                  # 数据管线
 │   ├── synth.py           # 文本行合成生成器（识别）
 │   ├── synth_det.py       # 整图文本框合成生成器（检测）
+│   ├── synthtext_rec.py   # SynthText 词级识别数据（wordBB 四点透视矫正 + 预裁剪缓存）
 │   ├── td500.py           # MSRA-TD500 解析
 │   ├── synthtext.py       # SynthText 数据集（缓存 + 中文路径兼容）
 │   ├── synthtext_preprocess.py  # SynthText gt.mat → 轻量缓存
@@ -198,7 +207,8 @@ SceneOCR/
 - [x] 端到端管线（成熟 CRAFT 检测 + 自研 CTC 识别）
 - [x] **真实数据训练死锁根因定位与修复**（数据管线 bug / train_backbone 死区 / OHEM 不动点，
       见 [调试实录](docs/debug-detector-story.md)）
-- [ ] **识别真实数据微调**（识别当前只在合成数据上训过，真实图需微调）← 下一步
+- [x] **识别真实数据微调**（SynthText 词级 15 万词，62 字符，整串 **60.6%**，端到端已跑通）
+- [ ] 识别真实数据提升（更大模型 / 全量 27 万词 / 更强增强）
 - [ ] SynthText 检测长训（受算力限制）
 - [ ] 知识蒸馏（从成熟模型学软输出）
 - [ ] 中文词表扩展 / 模型轻量化
