@@ -14,6 +14,7 @@
 import argparse
 import os
 import random
+import re
 import time
 
 import torch
@@ -89,6 +90,25 @@ def build_backbone(device):
     return ImageEncoder(trunk=trunk, neck=neck, scalp=1).to(device).eval()
 
 
+def load_pretrained_trunk(model, ckpt_path):
+    """加载预训练 Hiera 骨干权重(迁移学习起点)。
+
+    ckpt 里是 image_encoder.trunk.*, 需剥前缀 + 处理 Mlp 键名(layers.N.weight → .fc)。
+    这是 DBNet 检测从零训不收敛的关键解法: 骨干先有通用视觉特征, 检测头只需学"哪里是文字"。
+    """
+    sd = torch.load(ckpt_path, map_location="cpu", weights_only=True)["model"]
+    prefix = "image_encoder.trunk."
+    trunk_sd = {k[len(prefix):]: v for k, v in sd.items() if k.startswith(prefix)}
+    fixed = {}
+    for k, v in trunk_sd.items():
+        if re.search(r"\.mlp\.layers\.\d+\.(weight|bias)$", k):
+            k = re.sub(r"(\.mlp\.layers\.\d+)\.(weight|bias)$", r"\1.fc.\2", k)
+        fixed[k] = v
+    missing, unexpected = model.trunk.load_state_dict(fixed, strict=False)
+    print(f"预训练骨干加载: {len(fixed)} 个权重, missing={len(missing)}, unexpected={len(unexpected)}")
+    return missing, unexpected
+
+
 # ==================== 评估 ====================
 def binary_iou(pred_binary, gt):
     p = pred_binary > 0.5
@@ -128,6 +148,8 @@ def main():
     ap.add_argument("--steps", type=int, default=1000)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--train_backbone", action="store_true", help="一起训练骨干(慢)")
+    ap.add_argument("--pretrained_backbone", default="",
+                    help="预训练 Hiera 骨干权重路径(迁移学习起点, 加速收敛)")
     ap.add_argument("--log_every", type=int, default=100)
     ap.add_argument("--save_every", type=int, default=500)
     ap.add_argument("--ckpt", default="checkpoints/det_td500.pt")
@@ -159,6 +181,9 @@ def main():
                  f"img {args.img_size}, backbone训练={args.train_backbone}) ==")
 
     model = build_backbone(DEVICE)
+    if args.pretrained_backbone and os.path.exists(args.pretrained_backbone):
+        load_pretrained_trunk(model, args.pretrained_backbone)
+        log_line(args.log, f"== 已加载预训练骨干: {args.pretrained_backbone} ==")
     for p in model.parameters():
         p.requires_grad_(args.train_backbone)  # 默认冻结骨干
     head = DBNetHead(in_chans=256, num_levels=3).to(DEVICE)

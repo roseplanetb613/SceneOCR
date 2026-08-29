@@ -37,12 +37,14 @@ class DBNetHead(nn.Module):
         )
 
         # ---- 2. 拼接后的融合卷积 ----
+        # 用 GroupNorm 代替 BatchNorm: 小 batch + 训练骨干时 BN 统计不稳定
+        # 会导致融合特征塌缩(概率图输出恒定 0.5), GroupNorm 与 batch 大小无关更稳
         self.fuse_conv = nn.Sequential(
             nn.Conv2d(inner_chans * num_levels, inner_chans, 3, padding=1),
-            nn.BatchNorm2d(inner_chans),
+            nn.GroupNorm(32, inner_chans),
             nn.ReLU(inplace=True),
             nn.Conv2d(inner_chans, inner_chans, 3, padding=1),
-            nn.BatchNorm2d(inner_chans),
+            nn.GroupNorm(32, inner_chans),
             nn.ReLU(inplace=True),
         )
 
